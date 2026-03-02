@@ -1,10 +1,3 @@
-`dagster-dbt 0.28.17` — this is the latest version. The issue with `load_assets_from_dbt_cloud_job()` triggering the job twice is known in this version.
-
-**The fix — use a different approach.** Instead of `load_assets_from_dbt_cloud_job()` which triggers the job at import AND at materialization, we'll use the direct API trigger approach.
-
-Replace the **entire** `dagster/orchestrator.py` with this:
-
-```python
 import os
 import json
 import requests
