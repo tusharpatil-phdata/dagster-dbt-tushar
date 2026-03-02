@@ -1,34 +1,38 @@
 {{
   config(
-    materialized = 'table',
-    database     = 'CUSTOMERS_DB',
+    materialized = 'view',
+    database     = 'DAGSTER_DBT_KIEWIT_DB',
     schema       = 'staging',
     tags         = ['staging', 'silver']
   )
 }}
 
+
 with source as (
-    select * from {{ ref('lz_customers') }}
+    select * from {{ ref('raw_customers') }}
 ),
+
 
 cleaned as (
     select
         customer_id,
-        initcap(trim(full_name))                                as full_name,
-        initcap(trim(split_part(trim(full_name), ' ', 1)))      as first_name,
+        initcap(trim(full_name))                        as full_name,
+        initcap(trim(
+            split_part(trim(full_name), ' ', 1)
+        ))                                              as first_name,
         nullif(
             initcap(trim(
                 case
                     when position(' ' in trim(full_name)) > 0
                     then substr(
-                            trim(full_name),
-                            position(' ' in trim(full_name)) + 1
-                         )
+                        trim(full_name),
+                        position(' ' in trim(full_name)) + 1
+                    )
                     else ''
                 end
             )),
             ''
-        )                                                       as last_name,
+        )                                               as last_name,
         upper(left(split_part(trim(full_name), ' ', 1), 1))
             || coalesce(
                 upper(left(
@@ -40,24 +44,24 @@ cleaned as (
                     ), 1
                 )),
                 ''
-            )                                                   as name_initials,
-        _loaded_at,
-        _source_file
+            )                                           as name_initials
     from source
     where customer_id is not null
-      and full_name    is not null
+      and full_name   is not null
 ),
 
+
 deduped as (
-    select
-        *,
+    select *,
         row_number() over (
             partition by customer_id
-            order by _loaded_at desc
+            order by customer_id
         ) as _rn
     from cleaned
 )
 
-select * exclude (_rn)
+select
+    customer_id, full_name, first_name,
+    last_name, name_initials
 from deduped
 where _rn = 1
