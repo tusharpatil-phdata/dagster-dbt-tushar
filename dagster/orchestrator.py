@@ -34,10 +34,10 @@ dbt_cloud_connection = dbt_cloud_resource.configured(
 )
 
 
-# 3. AUTO-DISCOVER dbt MODELS
+# 3. AUTO-DISCOVER dbt MODELS FROM dbt CLOUD JOB
 customer_dbt_assets = load_assets_from_dbt_cloud_job(
     dbt_cloud=dbt_cloud_connection,
-    job_id=int(os.getenv('DBT_JOB_ID')),
+    job_id=int(os.getenv("DBT_JOB_ID")),
 )
 
 
@@ -61,18 +61,17 @@ def write_run_to_snowflake(
         run_id = context.dagster_run.run_id
         job_name = context.dagster_run.job_name
         stats = context.instance.get_run_stats(run_id)
-        error_json = json.dumps(error_msg) if error_msg else "{}"
+        error_json = json.dumps(error_msg) if error_msg else None
 
         cursor.execute(
             """
-           INSERT INTO DAGSTER_JOB_RUNS
+            INSERT INTO DAGSTER_JOB_RUNS
               (RUN_ID, JOB_NAME, STATUS,
-               START_TIME, END_TIME, ERROR_MESSAGE, LOGGED_AT)
+               START_TIME, END_TIME, ERROR_MESSAGE)
             VALUES (%s, %s, %s,
-                    CONVERT_TIMEZONE('UTC', 'Asia/Kolkata', TO_TIMESTAMP_NTZ(%s)),
-                    CONVERT_TIMEZONE('UTC', 'Asia/Kolkata', TO_TIMESTAMP_NTZ(%s)),
-                    PARSE_JSON(%s),
-                    CONVERT_TIMEZONE('UTC', 'Asia/Kolkata', CURRENT_TIMESTAMP()))
+                    TO_TIMESTAMP_NTZ(%s),
+                    TO_TIMESTAMP_NTZ(%s),
+                    %s)
             """,
             (run_id, job_name, status,
              stats.start_time, stats.end_time, error_json),
