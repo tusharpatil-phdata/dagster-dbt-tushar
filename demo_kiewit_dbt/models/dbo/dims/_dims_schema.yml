@@ -1,8 +1,7 @@
 version: 2
 
-
 models:
-  - name: dim_customers
+  - name: dim_customer
     description: 'Gold dimension - analytics-ready customer table'
     columns:
       - name: customer_id
@@ -10,5 +9,40 @@ models:
           - not_null
           - unique
       - name: full_name
+        tests:
+          - not_null
+
+  - name: dim_product
+    description: 'Gold dimension - product dimension'
+    columns:
+      - name: product_key
+        tests:
+          - not_null
+          - unique
+      - name: product_name
+        tests:
+          - not_null
+
+  - name: dim_store
+    description: 'Gold dimension - store dimension'
+    columns:
+      - name: store_key
+        tests:
+          - not_null
+          - unique
+      - name: store_name
+        tests:
+          - not_null
+
+  - name: dim_supply
+    description: 'Gold dimension - supply dimension'
+    columns:
+      - name: supply_key
+        tests:
+          - not_null
+      - name: supply_name
+        tests:
+          - not_null
+      - name: sku
         tests:
           - not_null

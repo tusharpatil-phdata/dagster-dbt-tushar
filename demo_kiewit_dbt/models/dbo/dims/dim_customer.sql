@@ -8,8 +8,8 @@
 }}
 
 
-with customers as (
-    select * from {{ ref('stg_customers') }}
+with customer as (
+    select * from {{ ref('stg_customer') }}
 )
 
 
@@ -20,4 +20,4 @@ select
     last_name,
     name_initials,
     CONVERT_TIMEZONE('America/Los_Angeles', 'Asia/Kolkata', current_timestamp()) as _updated_at
-from customers
+from customer

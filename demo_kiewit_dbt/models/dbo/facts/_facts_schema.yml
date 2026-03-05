@@ -1,0 +1,33 @@
+version: 2
+
+models:
+  - name: fct_order_detail
+    description: 'Fact table - order headers with metrics and dimensions'
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        tests:
+          - not_null
+      - name: store_id
+        tests:
+          - not_null
+      - name: order_total
+        tests:
+          - not_null
+
+  - name: fct_order_item
+    description: 'Fact table - order line items linked to products'
+    columns:
+      - name: order_item_id
+        tests:
+          - not_null
+          - unique
+      - name: order_id
+        tests:
+          - not_null
+      - name: sku
+        tests:
+          - not_null
