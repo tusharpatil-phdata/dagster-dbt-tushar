@@ -7,11 +7,9 @@
   )
 }}
 
-
 with source as (
-    select * from {{ ref('raw_customers') }}
+    select * from {{ ref('raw_customer') }}
 ),
-
 
 cleaned as (
     select
@@ -40,7 +38,8 @@ cleaned as (
                         substr(
                             trim(full_name),
                             position(' ' in trim(full_name)) + 1
-                        ), ''
+                        ),
+                        ''
                     ), 1
                 )),
                 ''
@@ -49,7 +48,6 @@ cleaned as (
     where customer_id is not null
       and full_name   is not null
 ),
-
 
 deduped as (
     select *,

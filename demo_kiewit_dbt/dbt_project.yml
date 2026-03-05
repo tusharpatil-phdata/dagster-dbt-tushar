@@ -14,17 +14,6 @@ snapshot-paths: [snapshots]
 target-path: target
 clean-targets: [target, dbt_packages]
 
-seeds:
-  demo_kiewit_dbt:
-    customer:
-      +database: DAGSTER_DBT_KIEWIT_DB
-      +schema: source
-      +quote_columns: false
-      +column_types:
-        id: varchar(36)
-        name: varchar(100)
-      +group: source
-
 models:
   demo_kiewit_dbt:
     lz:

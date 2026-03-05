@@ -1,14 +1,13 @@
 version: 2
 
-
 sources:
-  - name: raw_customers
-    description: 'Raw Jaffle Shop CSV loaded via dbt seed into SOURCE schema'
+  - name: raw_customer
+    description: 'Raw Jaffle Shop customer loaded into SOURCE schema'
     database: DAGSTER_DBT_KIEWIT_DB
     schema: SOURCE
     tables:
       - name: CUSTOMER
-        description: 'Seed table - CSV as-is'
+        description: 'Raw customer CSV as-is'
         columns:
           - name: ID
             tests:
@@ -18,15 +17,154 @@ sources:
             tests:
               - not_null
 
+  - name: raw_order_detail
+    description: 'Raw order_detail headers from order_detail.csv'
+    database: DAGSTER_DBT_KIEWIT_DB
+    schema: SOURCE
+    tables:
+      - name: ORDER_DETAIL
+        columns:
+          - name: ID
+            tests:
+              - not_null
+              - unique
+          - name: CUSTOMER
+            tests:
+              - not_null
+          - name: STORE_ID
+            tests:
+              - not_null
+
+  - name: raw_order_item
+    description: 'Raw order item from order_item.csv'
+    database: DAGSTER_DBT_KIEWIT_DB
+    schema: SOURCE
+    tables:
+      - name: ORDER_ITEM
+        columns:
+          - name: ID
+            tests:
+              - not_null
+              - unique
+          - name: ORDER_ID
+            tests:
+              - not_null
+          - name: SKU
+            tests:
+              - not_null
+
+  - name: raw_product
+    description: 'Raw product from product.csv'
+    database: DAGSTER_DBT_KIEWIT_DB
+    schema: SOURCE
+    tables:
+      - name: PRODUCT
+        columns:
+          - name: SKU
+            tests:
+              - not_null
+              - unique
+          - name: NAME
+            tests:
+              - not_null
+
+  - name: raw_store
+    description: 'Raw store from store.csv'
+    database: DAGSTER_DBT_KIEWIT_DB
+    schema: SOURCE
+    tables:
+      - name: STORE
+        columns:
+          - name: ID
+            tests:
+              - not_null
+              - unique
+          - name: NAME
+            tests:
+              - not_null
+
+  - name: raw_supply
+    description: 'Raw supplies from supply.csv'
+    database: DAGSTER_DBT_KIEWIT_DB
+    schema: SOURCE
+    tables:
+      - name: SUPPLY
+        columns:
+          - name: ID
+            tests:
+              - not_null      # no unique here, IDs repeat in CSV
+          - name: SKU
+            tests:
+              - not_null
 
 models:
-  - name: raw_customers
-    description: 'Bronze model - LZ.RAW_CUSTOMERS'
+  - name: raw_customer
+    description: 'Bronze model - LZ.RAW_CUSTOMER'
     columns:
       - name: customer_id
         tests:
           - not_null
           - unique
       - name: full_name
+        tests:
+          - not_null
+
+  - name: raw_order_detail
+    description: 'Bronze model - LZ.RAW_ORDER_DETAIL'
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        tests:
+          - not_null
+      - name: store_id
+        tests:
+          - not_null
+
+  - name: raw_order_item
+    description: 'Bronze model - LZ.RAW_ORDER_ITEM'
+    columns:
+      - name: order_item_id
+        tests:
+          - not_null
+          - unique
+      - name: order_id
+        tests:
+          - not_null
+      - name: sku
+        tests:
+          - not_null
+
+  - name: raw_product
+    description: 'Bronze model - LZ.RAW_PRODUCT'
+    columns:
+      - name: sku
+        tests:
+          - not_null
+          - unique
+      - name: name
+        tests:
+          - not_null
+
+  - name: raw_store
+    description: 'Bronze model - LZ.RAW_STORE'
+    columns:
+      - name: store_id
+        tests:
+          - not_null
+          - unique
+      - name: store_name
+        tests:
+          - not_null
+
+  - name: raw_supply
+    description: 'Bronze model - LZ.RAW_SUPPLY'
+    columns:
+      - name: supply_id
+        tests:
+          - not_null
+      - name: sku
         tests:
           - not_null
