@@ -20,10 +20,8 @@ from dagster_dbt import (
     load_assets_from_dbt_cloud_job,
 )
 
-
 # 1. LOAD SECRETS
 load_dotenv()
-
 
 # 2. CONFIGURE dbt CLOUD CONNECTION
 dbt_cloud_connection = dbt_cloud_resource.configured(
@@ -34,13 +32,11 @@ dbt_cloud_connection = dbt_cloud_resource.configured(
     }
 )
 
-
 # 3. AUTO-DISCOVER dbt MODELS FROM dbt CLOUD JOB
 customer_dbt_assets = load_assets_from_dbt_cloud_job(
     dbt_cloud=dbt_cloud_connection,
     job_id=int(os.getenv("DBT_JOB_ID")),
 )
-
 
 # 4. SNOWFLAKE AUDIT LOGGING
 def write_run_to_snowflake(
@@ -75,11 +71,17 @@ def write_run_to_snowflake(
                     %s,
                     CONVERT_TIMEZONE('America/Los_Angeles', 'Asia/Kolkata', CURRENT_TIMESTAMP()))
             """,
-            (run_id, job_name, status,
-             stats.start_time, stats.end_time, error_json),
+            (
+                run_id,
+                job_name,
+                status,
+                stats.start_time,
+                stats.end_time,
+                error_json,
+            ),
         )
         conn.commit()
-        context.log.info(f"Logged {status} to SANDBOX.METRICS")
+        context.log.info("Logged run to SANDBOX.METRICS.DAGSTER_JOB_RUNS")
     except Exception as e:
         context.log.error(f"Snowflake log failed: {e}")
     finally:
@@ -87,27 +89,34 @@ def write_run_to_snowflake(
             conn.close()
 
 # 4b. FETCH dbt CLOUD RUN DETAILS + LOG TO SNOWFLAKE
-def fetch_dbt_run_results(context):
+def fetch_dbt_run_results(context: RunStatusSensorContext):
     """Fetch per-model results from dbt Cloud and log to Snowflake."""
-    import requests
-
     host = os.getenv("DBT_CLOUD_HOST")
     account_id = os.getenv("DBT_CLOUD_ACCOUNT_ID")
     token = os.getenv("DBT_CLOUD_API_TOKEN")
     job_id = os.getenv("DBT_JOB_ID")
 
+    if not (host and account_id and token and job_id):
+        context.log.warning("dbt Cloud env vars missing, skipping fetch_dbt_run_results")
+        return
+
     headers = {"Authorization": f"Token {token}"}
 
     # Get latest run for this job
-    runs_url = f"{host}/api/v2/accounts/{account_id}/runs/?job_definition_id={job_id}&order_by=-id&limit=1"
-    run_resp = requests.get(runs_url, headers=headers)
+    runs_url = (
+        f"{host}/api/v2/accounts/{account_id}/runs/"
+        f"?job_definition_id={job_id}&order_by=-id&limit=1"
+    )
+    run_resp = requests.get(runs_url, headers=headers, timeout=20)
     run_resp.raise_for_status()
     latest_run = run_resp.json()["data"][0]
     dbt_run_id = latest_run["id"]
 
     # Fetch run results artifact
-    artifact_url = f"{host}/api/v2/accounts/{account_id}/runs/{dbt_run_id}/artifacts/run_results.json"
-    art_resp = requests.get(artifact_url, headers=headers)
+    artifact_url = (
+        f"{host}/api/v2/accounts/{account_id}/runs/{dbt_run_id}/artifacts/run_results.json"
+    )
+    art_resp = requests.get(artifact_url, headers=headers, timeout=20)
     art_resp.raise_for_status()
     results = art_resp.json()["results"]
 
@@ -121,7 +130,9 @@ def fetch_dbt_run_results(context):
 
     passed = sum(1 for r in results if r["status"] in ("success", "pass"))
     failed = sum(1 for r in results if r["status"] == "error")
-    context.log.info(f"  dbt Summary: {passed} passed, {failed} failed out of {len(results)} total")
+    context.log.info(
+        f"  dbt Summary: {passed} passed, {failed} failed out of {len(results)} total"
+    )
 
     # Write to Snowflake
     conn = None
@@ -147,12 +158,20 @@ def fetch_dbt_run_results(context):
                 VALUES (%s, %s, %s, %s, %s, %s,
                     CONVERT_TIMEZONE('America/Los_Angeles', 'Asia/Kolkata', CURRENT_TIMESTAMP()))
                 """,
-                (dagster_run_id, dbt_run_id, r["unique_id"],
-                 r["status"], rows_val, round(r["execution_time"], 2)),
+                (
+                    dagster_run_id,
+                    dbt_run_id,
+                    r["unique_id"],
+                    r["status"],
+                    rows_val,
+                    round(r["execution_time"], 2),
+                ),
             )
 
         conn.commit()
-        context.log.info(f"  Logged {len(results)} model results to SANDBOX.METRICS.DBT_MODEL_RUNS")
+        context.log.info(
+            f"  Logged {len(results)} model results to SANDBOX.METRICS.DBT_MODEL_RUNS"
+        )
     except Exception as e:
         context.log.error(f"  Failed to log model results: {e}")
     finally:
@@ -160,10 +179,8 @@ def fetch_dbt_run_results(context):
             conn.close()
 
 # 4c. TRIGGER dbt RETRY JOB ON FAILURE
-def trigger_dbt_retry(context):
+def trigger_dbt_retry(context: RunStatusSensorContext):
     """Trigger the dbt retry job to rerun only failed models."""
-    import requests
-
     host = os.getenv("DBT_CLOUD_HOST")
     account_id = os.getenv("DBT_CLOUD_ACCOUNT_ID")
     token = os.getenv("DBT_CLOUD_API_TOKEN")
@@ -181,21 +198,20 @@ def trigger_dbt_retry(context):
     url = f"{host}/api/v2/accounts/{account_id}/jobs/{retry_job_id}/run/"
     body = {"cause": "Auto-retry triggered by Dagster on failure"}
 
-    response = requests.post(url, headers=headers, json=body)
+    response = requests.post(url, headers=headers, json=body, timeout=20)
     response.raise_for_status()
     run_id = response.json()["data"]["id"]
     context.log.info(f"  Retry job triggered! dbt Cloud Run ID: {run_id}")
-    context.log.info(f"  Only failed models from the last run will be re-executed.")
-
+    context.log.info("  Only failed models from the last run will be re-executed.")
 
 # 4d. LOG RECORD COUNTS TO SNOWFLAKE
-def log_record_counts(context):
+def log_record_counts(context: RunStatusSensorContext):
     """
     After every successful run:
     1. Query each layer table for current row count
     2. Look up previous run's row count from LAYER_ROW_COUNTS table
     3. Calculate rows added (current - previous)
-    4. Log to Dagster UI (visible in Automation tab)
+    4. Log to Dagster UI
     5. Save to Snowflake LAYER_ROW_COUNTS table (full history)
     """
     conn = None
@@ -210,17 +226,16 @@ def log_record_counts(context):
         cursor = conn.cursor()
         dagster_run_id = context.dagster_run.run_id
 
-        # All 4 layer tables we want to track
+        # Updated to singular model/table names
         tables = [
-            ("SOURCE", "CUSTOMER"),        # Seed layer
-            ("LZ", "RAW_CUSTOMERS"),       # Bronze layer
-            ("STAGING", "STG_CUSTOMERS"),   # Silver layer (VIEW)
-            ("DBO", "DIM_CUSTOMERS"),       # Gold layer
+            ("SOURCE", "CUSTOMER"),        # Source layer
+            ("LZ", "RAW_CUSTOMER"),       # Bronze layer
+            ("STAGING", "STG_CUSTOMER"),  # Silver layer (VIEW)
+            ("DBO", "DIM_CUSTOMER"),      # Gold layer
         ]
 
         context.log.info("--- Record Counts ---")
         for schema, table in tables:
-
             # Step 1: Get current row count
             cursor.execute(f"SELECT COUNT(*) FROM {schema}.{table}")
             rows_after = cursor.fetchone()[0]
@@ -249,8 +264,14 @@ def log_record_counts(context):
                 VALUES (%s, %s, %s, %s, %s, %s,
                     CONVERT_TIMEZONE('America/Los_Angeles', 'Asia/Kolkata', CURRENT_TIMESTAMP()))
                 """,
-                (dagster_run_id, schema, table,
-                 rows_before, rows_after, rows_added),
+                (
+                    dagster_run_id,
+                    schema,
+                    table,
+                    rows_before,
+                    rows_after,
+                    rows_added,
+                ),
             )
 
             # Step 5: Log to Dagster UI
@@ -259,7 +280,9 @@ def log_record_counts(context):
             )
 
         conn.commit()
-        context.log.info("  Row counts logged to SANDBOX.METRICS.LAYER_ROW_COUNTS")
+        context.log.info(
+            "  Row counts logged to SANDBOX.METRICS.LAYER_ROW_COUNTS"
+        )
 
     except Exception as e:
         context.log.error(f"Record count failed: {e}")
@@ -268,49 +291,54 @@ def log_record_counts(context):
             conn.close()
 
 # 5. SENSORS (auto-start)
+
 @run_status_sensor(
     run_status=DagsterRunStatus.SUCCESS,
     default_status=DefaultSensorStatus.RUNNING,
 )
 def log_success_to_snowflake(context: RunStatusSensorContext):
+    """
+    Fires after every successful Dagster run.
+    1. Logs job status to DAGSTER_JOB_RUNS
+    2. Fetches per-model results from dbt Cloud -> saves to DBT_MODEL_RUNS
+    3. Logs record counts for CUSTOMER across SOURCE/LZ/STAGING/DBO
+    """
+    # 1) always log the run row (fast)
     write_run_to_snowflake(context, status="SUCCESS")
 
+    # 2) per-model dbt results
+    try:
+        fetch_dbt_run_results(context)
+    except Exception as e:
+        context.log.warning(f"Could not fetch dbt Cloud details: {e}")
+
+    # 3) layer row counts
+    try:
+        log_record_counts(context)
+    except Exception as e:
+        context.log.warning(f"Could not log record counts: {e}")
 
 @run_status_sensor(
     run_status=DagsterRunStatus.FAILURE,
     default_status=DefaultSensorStatus.RUNNING,
 )
 def log_failure_to_snowflake(context: RunStatusSensorContext):
+    """
+    Fires after every failed Dagster run.
+    1. Logs job status to DAGSTER_JOB_RUNS with error message
+    2. Best-effort trigger of dbt retry job
+    """
     error_data = None
     if context.failure_event and context.failure_event.step_failure_data:
         error_data = {
             "error_message": context.failure_event.step_failure_data.error.message
         }
+
     write_run_to_snowflake(context, status="FAILURE", error_msg=error_data)
     try:
         trigger_dbt_retry(context)
     except Exception as e:
         context.log.warning(f"Could not trigger retry job: {e}")
-
-
-
-@run_status_sensor(
-    run_status=DagsterRunStatus.SUCCESS,
-    default_status=DefaultSensorStatus.RUNNING,
-)
-def log_success_to_snowflake(context: RunStatusSensorContext):
-    write_run_to_snowflake(context, status="SUCCESS")
-    try:
-        fetch_dbt_run_results(context)
-        log_record_counts(context)
-    except Exception as e:
-        context.log.warning(f"Could not fetch dbt Cloud details: {e}")
-# This sensor fires after every SUCCESSFUL Dagster run
-# It does 3 things:
-# 1. Logs job status to DAGSTER_JOB_RUNS
-# 2. Fetches per-model results from dbt Cloud -> saves to DBT_MODEL_RUNS
-# 3. Counts rows in all layer tables -> saves to LAYER_ROW_COUNTS
-
 
 # 6. JOB + SCHEDULE
 run_customer_pipeline = define_asset_job(
@@ -324,7 +352,6 @@ daily_schedule = ScheduleDefinition(
     cron_schedule="0 6 * * *",
     execution_timezone="UTC",
 )
-
 
 # 7. REGISTER EVERYTHING
 defs = Definitions(
