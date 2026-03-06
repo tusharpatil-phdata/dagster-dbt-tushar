@@ -17,5 +17,6 @@ select
     sku,
     product_name,
     product_type,
-    1 as quantity
+    1 as quantity,
+    CONVERT_TIMEZONE('America/Los_Angeles', 'Asia/Kolkata', current_timestamp()) as _updated_at
 from line_items

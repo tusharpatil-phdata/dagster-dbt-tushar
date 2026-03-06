@@ -88,7 +88,7 @@ def write_run_to_snowflake(
         if conn:
             conn.close()
 
-# 4b. FETCH dbt CLOUD RUN DETAILS + LOG TO SNOWFLAKE (available but not used in sensor)
+# 4b. FETCH dbt CLOUD RUN DETAILS + LOG TO SNOWFLAKE
 def fetch_dbt_run_results(context: RunStatusSensorContext):
     """Fetch per-model results from dbt Cloud and log to Snowflake."""
     host = os.getenv("DBT_CLOUD_HOST")
@@ -226,7 +226,6 @@ def log_record_counts(context: RunStatusSensorContext):
         cursor = conn.cursor()
         dagster_run_id = context.dagster_run.run_id
 
-        # Track all entities across all layers
         tables = [
             # CUSTOMER
             ("SOURCE", "CUSTOMER"),
@@ -267,11 +266,9 @@ def log_record_counts(context: RunStatusSensorContext):
 
         context.log.info("--- Record Counts (all layers) ---")
         for schema, table in tables:
-            # Step 1: Get current row count
             cursor.execute(f"SELECT COUNT(*) FROM {schema}.{table}")
             rows_after = cursor.fetchone()[0]
 
-            # Step 2: Get previous run's row count from tracking table
             cursor.execute(
                 """
                 SELECT ROWS_AFTER FROM SANDBOX.METRICS.LAYER_ROW_COUNTS
@@ -281,12 +278,10 @@ def log_record_counts(context: RunStatusSensorContext):
                 (schema, table),
             )
             prev = cursor.fetchone()
-            rows_before = prev[0] if prev else 0  # First run = 0
+            rows_before = prev[0] if prev else 0
 
-            # Step 3: Calculate difference
             rows_added = rows_after - rows_before
 
-            # Step 4: Save to Snowflake with IST timestamp
             cursor.execute(
                 """
                 INSERT INTO SANDBOX.METRICS.LAYER_ROW_COUNTS
@@ -305,7 +300,6 @@ def log_record_counts(context: RunStatusSensorContext):
                 ),
             )
 
-            # Step 5: Log to Dagster UI
             context.log.info(
                 f"  {schema}.{table}: {rows_before:,} -> {rows_after:,} ({rows_added:+,} rows)"
             )
@@ -331,15 +325,16 @@ def log_success_to_snowflake(context: RunStatusSensorContext):
     """
     Fires after every successful Dagster run.
     1. Logs job status to DAGSTER_JOB_RUNS
-    2. Logs record counts for ALL tables across SOURCE/LZ/STAGING/DBO
-
-    NOTE: We intentionally do NOT call fetch_dbt_run_results here
-    to keep the sensor tick fast and avoid the 60s timeout.
+    2. Fetches per-model results from dbt Cloud -> DBT_MODEL_RUNS
+    3. Logs record counts for ALL tables across SOURCE/LZ/STAGING/DBO
     """
-    # 1) log the run row (fast)
     write_run_to_snowflake(context, status="SUCCESS")
 
-    # 2) layer row counts
+    try:
+        fetch_dbt_run_results(context)
+    except Exception as e:
+        context.log.warning(f"Could not fetch dbt Cloud details: {e}")
+
     try:
         log_record_counts(context)
     except Exception as e:
