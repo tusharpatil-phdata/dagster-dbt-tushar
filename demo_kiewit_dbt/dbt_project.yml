@@ -22,15 +22,19 @@ models:
       +materialized: table
       +tags: [lz, bronze]
       +group: bronze
+
     staging:
       +database: DAGSTER_DBT_KIEWIT_DB
       +schema: staging
       +materialized: view
       +tags: [staging, silver]
       +group: silver
+
     dbo:
       +database: DAGSTER_DBT_KIEWIT_DB
       +schema: dbo
       +materialized: table
       +tags: [dbo, gold]
       +group: gold
+      +post-hook:
+        - "{{ log_model_run() }}"
