@@ -464,89 +464,7 @@ def trigger_dbt_retry(context: RunStatusSensorContext):
 
 
 # ══════════════════════════════════════════════════════════════
-# 5d. LOG SOURCE TABLE COUNTS AFTER INGESTION
-#     Only tracks SOURCE tables (where data was just ingested)
-# ══════════════════════════════════════════════════════════════
-def log_source_counts(context: RunStatusSensorContext):
-    """Log row counts for SOURCE tables only — runs after ingestion."""
-    conn = None
-    try:
-        conn = snowflake.connector.connect(
-            user=os.getenv("SNOWFLAKE_USER"),
-            password=os.getenv("SNOWFLAKE_PASSWORD"),
-            account=os.getenv("SNOWFLAKE_ACCOUNT"),
-            warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
-            database="DAGSTER_DBT_KIEWIT_DB",
-        )
-        cursor = conn.cursor()
-        dagster_run_id = context.dagster_run.run_id
-
-        source_tables = [
-            ("SOURCE", "CUSTOMER"),
-            ("SOURCE", "ORDER_DETAIL"),
-            ("SOURCE", "ORDER_ITEM"),
-            ("SOURCE", "PRODUCT"),
-            ("SOURCE", "STORE"),
-            ("SOURCE", "SUPPLY"),
-        ]
-
-        context.log.info("=" * 60)
-        context.log.info("  SOURCE LAYER ROW COUNTS (after ingestion)")
-        context.log.info("=" * 60)
-
-        for schema, table in source_tables:
-            cursor.execute(f"SELECT COUNT(*) FROM {schema}.{table}")
-            rows_after = cursor.fetchone()[0]
-
-            cursor.execute(
-                """
-                SELECT ROWS_AFTER FROM METRICS.LAYER_ROW_COUNTS
-                WHERE SCHEMA_NAME = %s AND TABLE_NAME = %s
-                ORDER BY LOGGED_AT DESC LIMIT 1
-                """,
-                (schema, table),
-            )
-            prev = cursor.fetchone()
-            rows_before = prev[0] if prev else 0
-            rows_added = rows_after - rows_before
-
-            if rows_before == 0 and rows_after > 0:
-                change_type = "INITIAL LOAD"
-            elif rows_added > 0:
-                change_type = f"+{rows_added:,} new rows"
-            elif rows_added == 0:
-                change_type = f"no change ({rows_after:,} rows)"
-            else:
-                change_type = f"-{abs(rows_added):,} rows removed"
-
-            cursor.execute(
-                """
-                INSERT INTO METRICS.LAYER_ROW_COUNTS
-                  (DAGSTER_RUN_ID, SCHEMA_NAME, TABLE_NAME,
-                   ROWS_BEFORE, ROWS_AFTER, ROWS_ADDED, LOGGED_AT)
-                VALUES (%s, %s, %s, %s, %s, %s,
-                    CONVERT_TIMEZONE('America/Los_Angeles', 'Asia/Kolkata', CURRENT_TIMESTAMP()))
-                """,
-                (dagster_run_id, schema, table,
-                 rows_before, rows_after, rows_added),
-            )
-
-            context.log.info(f"  {schema}.{table}: {rows_before:,} -> {rows_after:,} ({change_type})")
-
-        conn.commit()
-        context.log.info("-" * 60)
-        context.log.info("  SOURCE counts saved to METRICS.LAYER_ROW_COUNTS")
-        context.log.info("=" * 60)
-
-    except Exception as e:
-        context.log.error(f"Source count failed: {e}")
-    finally:
-        if conn:
-            conn.close()
-
- 
-# ══════════════════════════════════════════════════════════════
-# 5e. LOG RECORD COUNTS TO SNOWFLAKE (ALL 24 TABLES)
+# 5d. LOG RECORD COUNTS TO SNOWFLAKE (ALL 24 TABLES)
 #     After every successful dbt run, counts rows in all layers
 #     Compares with previous run (no hardcoded values)
 #     Checks percentage-based thresholds
@@ -665,8 +583,9 @@ def log_record_counts(context: RunStatusSensorContext):
                 f"  {schema}.{table}: {rows_before:,} -> {rows_after:,} ({change_type})"
             )
 
-            # Threshold checks (based on previous run)
-            if rows_before > 0:
+            # Threshold checks ONLY for SOURCE layer
+            # LZ/STAGING/DBO are derived from SOURCE — they just reflect it
+            if rows_before > 0 and schema == "SOURCE":
                 max_insert = int(rows_before * MAX_INSERT_PCT / 100) or 1
                 if inserted > max_insert:
                     pct = round(inserted / rows_before * 100)
@@ -708,9 +627,96 @@ def log_record_counts(context: RunStatusSensorContext):
 
 
 # ══════════════════════════════════════════════════════════════
+# 5e. LOG SOURCE TABLE COUNTS AFTER INGESTION
+#     Only tracks SOURCE tables (where data was just ingested)
+#     Runs after ingestion_job, NOT after dbt_job
+# ══════════════════════════════════════════════════════════════
+def log_source_counts(context: RunStatusSensorContext):
+    """Log row counts for SOURCE tables only — runs after ingestion."""
+    conn = None
+    try:
+        conn = snowflake.connector.connect(
+            user=os.getenv("SNOWFLAKE_USER"),
+            password=os.getenv("SNOWFLAKE_PASSWORD"),
+            account=os.getenv("SNOWFLAKE_ACCOUNT"),
+            warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
+            database="DAGSTER_DBT_KIEWIT_DB",
+        )
+        cursor = conn.cursor()
+        dagster_run_id = context.dagster_run.run_id
+
+        source_tables = [
+            ("SOURCE", "CUSTOMER"),
+            ("SOURCE", "ORDER_DETAIL"),
+            ("SOURCE", "ORDER_ITEM"),
+            ("SOURCE", "PRODUCT"),
+            ("SOURCE", "STORE"),
+            ("SOURCE", "SUPPLY"),
+        ]
+
+        context.log.info("=" * 60)
+        context.log.info("  SOURCE LAYER ROW COUNTS (after ingestion)")
+        context.log.info("=" * 60)
+
+        for schema, table in source_tables:
+            cursor.execute(f"SELECT COUNT(*) FROM {schema}.{table}")
+            rows_after = cursor.fetchone()[0]
+
+            cursor.execute(
+                """
+                SELECT ROWS_AFTER FROM METRICS.LAYER_ROW_COUNTS
+                WHERE SCHEMA_NAME = %s AND TABLE_NAME = %s
+                ORDER BY LOGGED_AT DESC LIMIT 1
+                """,
+                (schema, table),
+            )
+            prev = cursor.fetchone()
+            rows_before = prev[0] if prev else 0
+            rows_added = rows_after - rows_before
+
+            if rows_before == 0 and rows_after > 0:
+                change_type = "INITIAL LOAD"
+            elif rows_added > 0:
+                change_type = f"+{rows_added:,} new rows"
+            elif rows_added == 0:
+                change_type = f"no change ({rows_after:,} rows)"
+            else:
+                change_type = f"-{abs(rows_added):,} rows removed"
+
+            cursor.execute(
+                """
+                INSERT INTO METRICS.LAYER_ROW_COUNTS
+                  (DAGSTER_RUN_ID, SCHEMA_NAME, TABLE_NAME,
+                   ROWS_BEFORE, ROWS_AFTER, ROWS_ADDED, LOGGED_AT)
+                VALUES (%s, %s, %s, %s, %s, %s,
+                    CONVERT_TIMEZONE('America/Los_Angeles', 'Asia/Kolkata', CURRENT_TIMESTAMP()))
+                """,
+                (dagster_run_id, schema, table,
+                 rows_before, rows_after, rows_added),
+            )
+
+            context.log.info(f"  {schema}.{table}: {rows_before:,} -> {rows_after:,} ({change_type})")
+
+        conn.commit()
+        context.log.info("-" * 60)
+        context.log.info("  SOURCE counts saved to METRICS.LAYER_ROW_COUNTS")
+        context.log.info("=" * 60)
+
+    except Exception as e:
+        context.log.error(f"Source count failed: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+# ══════════════════════════════════════════════════════════════
 # 6. SENSORS
-#    - log_success_to_snowflake: logs dbt job success + row counts
-#    - log_failure_to_snowflake: logs failure + triggers retry
+#    - log_success_to_snowflake: different behavior per job
+#      * After ingestion: logs SOURCE row counts only
+#      * After dbt: logs all 24 table row counts
+#    - log_failure_to_snowflake: different behavior per job
+#      * After ingestion failure: logs error only (no retry)
+#      * After dbt failure: logs error + triggers retry
 #    - trigger_dbt_after_ingestion: chains ingestion -> dbt
 # ══════════════════════════════════════════════════════════════
 @run_status_sensor(
@@ -731,7 +737,6 @@ def log_success_to_snowflake(context: RunStatusSensorContext):
             log_source_counts(context)
         except Exception as e:
             context.log.warning(f"  Could not log source counts: {e}")
-
     elif context.dagster_run.job_name == "trigger_dbt_cloud_job":
         # After dbt — log all 24 table counts
         try:
@@ -747,7 +752,8 @@ def log_success_to_snowflake(context: RunStatusSensorContext):
 def log_failure_to_snowflake(context: RunStatusSensorContext):
     """
     Fires after every failed Dagster run.
-    Logs failure + triggers dbt retry job.
+    - After ingestion failure: logs error only (no retry needed)
+    - After dbt failure: logs error + triggers retry job
     """
     error_data = None
     if context.failure_event and context.failure_event.step_failure_data:
@@ -755,10 +761,15 @@ def log_failure_to_snowflake(context: RunStatusSensorContext):
             "error_message": context.failure_event.step_failure_data.error.message
         }
     write_run_to_snowflake(context, status="FAILURE", error_msg=error_data)
-    try:
-        trigger_dbt_retry(context)
-    except Exception as e:
-        context.log.warning(f"  Could not trigger retry job: {e}")
+
+    # Only trigger retry if dbt job failed, not if ingestion failed
+    if context.dagster_run.job_name == "trigger_dbt_cloud_job":
+        try:
+            trigger_dbt_retry(context)
+        except Exception as e:
+            context.log.warning(f"  Could not trigger retry job: {e}")
+    else:
+        context.log.info("  Ingestion failed — dbt will not run, no retry needed")
 
 
 # ══════════════════════════════════════════════════════════════
