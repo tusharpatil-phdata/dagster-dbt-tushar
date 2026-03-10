@@ -1,6 +1,7 @@
 {{
   config(
     materialized = 'table',
+    transient = false,
     database     = 'DAGSTER_DBT_KIEWIT_DB',
     schema       = 'dbo',
     tags         = ['dbo', 'gold']
