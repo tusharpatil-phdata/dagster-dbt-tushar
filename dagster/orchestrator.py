@@ -3,6 +3,7 @@ import json
 import random
 import snowflake.connector
 import requests
+import uuid
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -61,51 +62,50 @@ def ingest_daily_data(context):
 
         # ══════════════════════════════════════════════
         # STEP 1: INGEST DATA (simulate daily load)
-        # In production: Fivetran/Airbyte/API does this
+        # All IDs are UUIDs except PRODUCT (SKU) and SUPPLY (SUP-xxx)
         # ══════════════════════════════════════════════
         context.log.info("=" * 60)
         context.log.info("  STEP 1: DAILY DATA INGESTION")
         context.log.info("=" * 60)
 
+        import uuid
+
         first_names = ["John", "Jane", "Mike", "Sara", "Alex", "Emma", "Tom", "Lisa", "Ryan", "Kate"]
         last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Davis", "Miller", "Wilson"]
 
-        # Get max IDs to avoid duplicate inserts
-        cursor.execute("SELECT COALESCE(MAX(ID), 0) FROM SOURCE.CUSTOMER")
-        max_cust_id = int(cursor.fetchone()[0])
-        cursor.execute("SELECT COALESCE(MAX(ID), 0) FROM SOURCE.ORDER_DETAIL")
-        max_order_id = int(cursor.fetchone()[0])
-        cursor.execute("SELECT COALESCE(MAX(ID), 0) FROM SOURCE.ORDER_ITEM")
-        max_item_id = int(cursor.fetchone()[0])
-        cursor.execute("SELECT COALESCE(MAX(ID), 0) FROM SOURCE.SUPPLY")
-        max_supply_id = int(cursor.fetchone()[0])
+        # Get existing IDs for references
+        cursor.execute("SELECT ID FROM SOURCE.CUSTOMER ORDER BY RANDOM() LIMIT 10")
+        existing_customers = [r[0] for r in cursor.fetchall()]
+
+        cursor.execute("SELECT ID FROM SOURCE.STORE ORDER BY RANDOM() LIMIT 1")
+        random_store = cursor.fetchone()[0]
+
+        cursor.execute("SELECT SKU FROM SOURCE.PRODUCT")
+        all_skus = [r[0] for r in cursor.fetchall()]
 
         # ── CUSTOMER: insert + update + delete ──
         new_custs = random.randint(3, 5)
         for i in range(new_custs):
-            cid = max_cust_id + i + 1
+            cid = str(uuid.uuid4())
             name = f"{random.choice(first_names)} {random.choice(last_names)}"
-            cursor.execute("INSERT INTO SOURCE.CUSTOMER (ID, NAME) VALUES (%s, %s)", (str(cid), name))
+            cursor.execute("INSERT INTO SOURCE.CUSTOMER (ID, NAME) VALUES (%s, %s)", (cid, name))
 
         upd_custs = random.randint(2, 3)
         cursor.execute(f"SELECT ID FROM SOURCE.CUSTOMER ORDER BY RANDOM() LIMIT {upd_custs}")
         for row in cursor.fetchall():
-            cursor.execute("UPDATE SOURCE.CUSTOMER SET NAME = %s WHERE ID = %s",
-                (f"{random.choice(first_names)} {random.choice(last_names)}", row[0]))
+            new_name = f"{random.choice(first_names)} {random.choice(last_names)}"
+            cursor.execute("UPDATE SOURCE.CUSTOMER SET NAME = %s WHERE ID = %s", (new_name, row[0]))
 
         cursor.execute("DELETE FROM SOURCE.CUSTOMER WHERE ID = (SELECT ID FROM SOURCE.CUSTOMER ORDER BY RANDOM() LIMIT 1)")
         context.log.info(f"  CUSTOMER: +{new_custs} inserts | {upd_custs} updates | -1 deletes")
 
         # ── ORDER_DETAIL: insert + update + delete ──
-        cursor.execute("SELECT ID FROM SOURCE.CUSTOMER ORDER BY RANDOM() LIMIT 10")
-        random_customers = [r[0] for r in cursor.fetchall()]
-        cursor.execute("SELECT ID FROM SOURCE.STORE ORDER BY RANDOM() LIMIT 1")
-        random_store = cursor.fetchone()[0]
-
         new_orders = random.randint(5, 10)
+        new_order_ids = []
         for i in range(new_orders):
-            oid = max_order_id + i + 1
-            cust = random.choice(random_customers)
+            oid = str(uuid.uuid4())
+            new_order_ids.append(oid)
+            cust = random.choice(existing_customers)
             order_date = datetime.now() - timedelta(days=random.randint(0, 2))
             subtotal = round(random.uniform(5, 100), 2)
             tax = round(subtotal * 0.08, 2)
@@ -114,28 +114,27 @@ def ingest_daily_data(context):
                 """INSERT INTO SOURCE.ORDER_DETAIL
                    (ID, CUSTOMER, ORDERED_AT, STORE_ID, SUBTOTAL, TAX_PAID, ORDER_TOTAL)
                    VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                (str(oid), str(cust), order_date.isoformat(), str(random_store),
+                (oid, cust, order_date.isoformat(), random_store,
                  str(subtotal), str(tax), str(total)))
 
         upd_orders = random.randint(3, 5)
         cursor.execute(f"SELECT ID FROM SOURCE.ORDER_DETAIL ORDER BY RANDOM() LIMIT {upd_orders}")
         for row in cursor.fetchall():
+            new_total = round(random.uniform(10, 200), 2)
             cursor.execute("UPDATE SOURCE.ORDER_DETAIL SET ORDER_TOTAL = %s WHERE ID = %s",
-                (str(round(random.uniform(10, 200), 2)), row[0]))
+                (str(new_total), row[0]))
 
         cursor.execute("DELETE FROM SOURCE.ORDER_DETAIL WHERE ID IN (SELECT ID FROM SOURCE.ORDER_DETAIL ORDER BY RANDOM() LIMIT 2)")
         context.log.info(f"  ORDER_DETAIL: +{new_orders} inserts | {upd_orders} updates | -2 deletes")
 
-        # ── ORDER_ITEM: insert + delete (items don't get updated) ──
-        cursor.execute("SELECT SKU FROM SOURCE.PRODUCT")
-        all_skus = [r[0] for r in cursor.fetchall()]
-
+        # ── ORDER_ITEM: insert + delete ──
         new_items = 0
-        for i in range(new_orders):
+        for oid in new_order_ids:
             for j in range(random.randint(2, 3)):
-                iid = max_item_id + new_items + 1
+                iid = str(uuid.uuid4())
+                sku = random.choice(all_skus)
                 cursor.execute("INSERT INTO SOURCE.ORDER_ITEM (ID, ORDER_ID, SKU) VALUES (%s, %s, %s)",
-                    (str(iid), str(max_order_id + i + 1), random.choice(all_skus)))
+                    (iid, oid, sku))
                 new_items += 1
 
         del_items = random.randint(2, 4)
@@ -147,18 +146,25 @@ def ingest_daily_data(context):
         context.log.info("  STORE: no changes (master data)")
 
         # ── SUPPLY: insert + update + delete ──
+        # Supply IDs are like SUP-001, SUP-002, etc.
+        cursor.execute("SELECT MAX(CAST(REPLACE(ID, 'SUP-', '') AS INTEGER)) FROM SOURCE.SUPPLY WHERE ID LIKE 'SUP-%'")
+        max_sup_result = cursor.fetchone()[0]
+        max_sup_num = int(max_sup_result) if max_sup_result else 0
+
         new_supplies = random.randint(1, 2)
         for i in range(new_supplies):
-            sid = max_supply_id + i + 1
-            cursor.execute("INSERT INTO SOURCE.SUPPLY (ID, NAME, COST, PERISHABLE, SKU) VALUES (%s, %s, %s, %s, %s)",
-                (str(sid), f"Supply-{sid}", str(round(random.uniform(1, 50), 2)),
-                 random.choice(["TRUE", "FALSE"]), random.choice(all_skus)))
+            sid = f"SUP-{str(max_sup_num + i + 1).zfill(3)}"
+            sku = random.choice(all_skus)
+            cost = round(random.uniform(1, 50), 2)
+            cursor.execute(
+                "INSERT INTO SOURCE.SUPPLY (ID, NAME, COST, PERISHABLE, SKU) VALUES (%s, %s, %s, %s, %s)",
+                (sid, f"supply item {sid}", str(cost), random.choice(["true", "false"]), sku))
 
         cursor.execute("SELECT ID FROM SOURCE.SUPPLY ORDER BY RANDOM() LIMIT 1")
         sup_row = cursor.fetchone()
         if sup_row:
-            cursor.execute("UPDATE SOURCE.SUPPLY SET COST = %s WHERE ID = %s",
-                (str(round(random.uniform(1, 50), 2)), sup_row[0]))
+            new_cost = round(random.uniform(1, 50), 2)
+            cursor.execute("UPDATE SOURCE.SUPPLY SET COST = %s WHERE ID = %s", (str(new_cost), sup_row[0]))
 
         cursor.execute("DELETE FROM SOURCE.SUPPLY WHERE ID = (SELECT ID FROM SOURCE.SUPPLY ORDER BY RANDOM() LIMIT 1)")
         context.log.info(f"  SUPPLY: +{new_supplies} inserts | 1 updates | -1 deletes")
