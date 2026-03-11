@@ -21,33 +21,32 @@ from dagster import (
     AssetKey,
     Output,
     RunRequest,
+    RetryPolicy,
 )
 from dagster_dbt import (
     dbt_cloud_resource,
     load_assets_from_dbt_cloud_job,
 )
 
-
 # ══════════════════════════════════════════════════════════════
 # 1. LOAD SECRETS
 # ══════════════════════════════════════════════════════════════
 load_dotenv()
 
-
 # ══════════════════════════════════════════════════════════════
-# 2. SIMULATE DAILY INGESTION + THRESHOLD CHECK
+# 2. INGEST FROM ADLS + THRESHOLD CHECK
 #    Runs BEFORE dbt — if thresholds breached, dbt won't run
-#    IDs use UUID format to match SOURCE table structure
 # ══════════════════════════════════════════════════════════════
 @asset(
     key=AssetKey("ingest_daily_data"),
     group_name="ingestion",
     compute_kind="snowflake",
-    description="Ingest daily data into SOURCE + check thresholds before dbt runs",
+    description="Ingest data from ADLS into SOURCE + check thresholds before dbt runs",
+    retry_policy=RetryPolicy(max_retries=3, delay=30),
 )
 def ingest_daily_data(context):
     """
-    Step 1: Insert/Update/Delete rows in SOURCE (simulating daily ingestion)
+    Step 1: Load data from ADLS Gen2 into SOURCE tables (TRUNCATE + COPY)
     Step 2: Read Snowflake streams + thresholds from config table
     Step 3: If breached -> FAIL (dbt won't run)
              If OK -> PASS (dbt runs next via sensor)
@@ -65,113 +64,69 @@ def ingest_daily_data(context):
         cursor = conn.cursor()
 
         # ══════════════════════════════════════════════
-        # STEP 1: INGEST DATA (simulate daily load)
-        # In production: Fivetran/Airbyte/API does this
+        # STEP 1: INGEST FROM ADLS (TRUNCATE + COPY)
+        # ADLS stage + file format are already configured:
+        #   - STAGE  : SOURCE.ADLS_RAW_STAGE
+        #   - FORMAT : SOURCE.CSV_FORMAT
+        # This step ensures SOURCE tables match latest CSVs in ADLS.
         # ══════════════════════════════════════════════
         context.log.info("=" * 60)
-        context.log.info("  STEP 1: DAILY DATA INGESTION")
+        context.log.info("  STEP 1: LOAD FROM ADLS INTO SOURCE")
         context.log.info("=" * 60)
 
-        first_names = ["John", "Jane", "Mike", "Sara", "Alex", "Emma", "Tom", "Lisa", "Ryan", "Kate"]
-        last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Davis", "Miller", "Wilson"]
+        # 1a) Truncate all SOURCE tables
+        truncate_cmds = [
+            "TRUNCATE TABLE CUSTOMER",
+            "TRUNCATE TABLE ORDER_DETAIL",
+            "TRUNCATE TABLE ORDER_ITEM",
+            "TRUNCATE TABLE PRODUCT",
+            "TRUNCATE TABLE STORE",
+            "TRUNCATE TABLE SUPPLY",
+        ]
+        for sql in truncate_cmds:
+            context.log.info(f"  Running: {sql}")
+            cursor.execute(sql)
 
-        # Get existing IDs for foreign key references
-        cursor.execute("SELECT ID FROM SOURCE.CUSTOMER ORDER BY RANDOM() LIMIT 10")
-        existing_customers = [r[0] for r in cursor.fetchall()]
-
-        cursor.execute("SELECT ID FROM SOURCE.STORE ORDER BY RANDOM() LIMIT 1")
-        random_store = cursor.fetchone()[0]
-
-        cursor.execute("SELECT SKU FROM SOURCE.PRODUCT")
-        all_skus = [r[0] for r in cursor.fetchall()]
-
-        # ── CUSTOMER: insert + update + delete ──
-        new_custs = random.randint(3, 5)
-        for i in range(new_custs):
-            cid = str(uuid.uuid4())
-            name = f"{random.choice(first_names)} {random.choice(last_names)}"
-            cursor.execute("INSERT INTO SOURCE.CUSTOMER (ID, NAME) VALUES (%s, %s)", (cid, name))
-
-        upd_custs = random.randint(2, 3)
-        cursor.execute(f"SELECT ID FROM SOURCE.CUSTOMER ORDER BY RANDOM() LIMIT {upd_custs}")
-        for row in cursor.fetchall():
-            new_name = f"{random.choice(first_names)} {random.choice(last_names)}"
-            cursor.execute("UPDATE SOURCE.CUSTOMER SET NAME = %s WHERE ID = %s", (new_name, row[0]))
-
-        cursor.execute("DELETE FROM SOURCE.CUSTOMER WHERE ID = (SELECT ID FROM SOURCE.CUSTOMER ORDER BY RANDOM() LIMIT 1)")
-        context.log.info(f"  CUSTOMER: +{new_custs} inserts | {upd_custs} updates | -1 deletes")
-
-        # ── ORDER_DETAIL: insert + update + delete ──
-        new_orders = random.randint(5, 10)
-        new_order_ids = []
-        for i in range(new_orders):
-            oid = str(uuid.uuid4())
-            new_order_ids.append(oid)
-            cust = random.choice(existing_customers)
-            order_date = datetime.now() - timedelta(days=random.randint(0, 2))
-            subtotal = round(random.uniform(5, 100), 2)
-            tax = round(subtotal * 0.08, 2)
-            total = round(subtotal + tax, 2)
-            cursor.execute(
-                """INSERT INTO SOURCE.ORDER_DETAIL
-                   (ID, CUSTOMER, ORDERED_AT, STORE_ID, SUBTOTAL, TAX_PAID, ORDER_TOTAL)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                (oid, cust, order_date.isoformat(), random_store,
-                 str(subtotal), str(tax), str(total)))
-
-        upd_orders = random.randint(3, 5)
-        cursor.execute(f"SELECT ID FROM SOURCE.ORDER_DETAIL ORDER BY RANDOM() LIMIT {upd_orders}")
-        for row in cursor.fetchall():
-            new_total = round(random.uniform(10, 200), 2)
-            cursor.execute("UPDATE SOURCE.ORDER_DETAIL SET ORDER_TOTAL = %s WHERE ID = %s",
-                (str(new_total), row[0]))
-
-        cursor.execute("DELETE FROM SOURCE.ORDER_DETAIL WHERE ID IN (SELECT ID FROM SOURCE.ORDER_DETAIL ORDER BY RANDOM() LIMIT 2)")
-        context.log.info(f"  ORDER_DETAIL: +{new_orders} inserts | {upd_orders} updates | -2 deletes")
-
-        # ── ORDER_ITEM: insert + delete (items don't get updated) ──
-        new_items = 0
-        for oid in new_order_ids:
-            for j in range(random.randint(2, 3)):
-                iid = str(uuid.uuid4())
-                sku = random.choice(all_skus)
-                cursor.execute("INSERT INTO SOURCE.ORDER_ITEM (ID, ORDER_ID, SKU) VALUES (%s, %s, %s)",
-                    (iid, oid, sku))
-                new_items += 1
-
-        del_items = random.randint(2, 4)
-        cursor.execute(f"DELETE FROM SOURCE.ORDER_ITEM WHERE ID IN (SELECT ID FROM SOURCE.ORDER_ITEM ORDER BY RANDOM() LIMIT {del_items})")
-        context.log.info(f"  ORDER_ITEM: +{new_items} inserts | 0 updates | -{del_items} deletes")
-
-        # ── PRODUCT + STORE: master data, no daily changes ──
-        context.log.info("  PRODUCT: no changes (master data)")
-        context.log.info("  STORE: no changes (master data)")
-
-        # ── SUPPLY: insert + update + delete ──
-        # Supply IDs are like SUP-001, SUP-002, etc.
-        cursor.execute("SELECT MAX(CAST(REPLACE(ID, 'SUP-', '') AS INTEGER)) FROM SOURCE.SUPPLY WHERE ID LIKE 'SUP-%'")
-        max_sup_result = cursor.fetchone()[0]
-        max_sup_num = int(max_sup_result) if max_sup_result else 0
-
-        new_supplies = random.randint(1, 2)
-        for i in range(new_supplies):
-            sid = f"SUP-{str(max_sup_num + i + 1).zfill(3)}"
-            sku = random.choice(all_skus)
-            cost = round(random.uniform(1, 50), 2)
-            cursor.execute(
-                "INSERT INTO SOURCE.SUPPLY (ID, NAME, COST, PERISHABLE, SKU) VALUES (%s, %s, %s, %s, %s)",
-                (sid, f"supply item {sid}", str(cost), random.choice(["true", "false"]), sku))
-
-        cursor.execute("SELECT ID FROM SOURCE.SUPPLY ORDER BY RANDOM() LIMIT 1")
-        sup_row = cursor.fetchone()
-        if sup_row:
-            new_cost = round(random.uniform(1, 50), 2)
-            cursor.execute("UPDATE SOURCE.SUPPLY SET COST = %s WHERE ID = %s", (str(new_cost), sup_row[0]))
-
-        cursor.execute("DELETE FROM SOURCE.SUPPLY WHERE ID = (SELECT ID FROM SOURCE.SUPPLY ORDER BY RANDOM() LIMIT 1)")
-        context.log.info(f"  SUPPLY: +{new_supplies} inserts | 1 updates | -1 deletes")
+        # 1b) COPY from ADLS stage into each SOURCE table
+        copy_cmds = [
+            """
+            COPY INTO CUSTOMER
+            FROM @SOURCE.ADLS_RAW_STAGE/customer.csv
+            FILE_FORMAT = (FORMAT_NAME = SOURCE.CSV_FORMAT)
+            """,
+            """
+            COPY INTO ORDER_DETAIL
+            FROM @SOURCE.ADLS_RAW_STAGE/order_detail.csv
+            FILE_FORMAT = (FORMAT_NAME = SOURCE.CSV_FORMAT)
+            """,
+            """
+            COPY INTO ORDER_ITEM
+            FROM @SOURCE.ADLS_RAW_STAGE/order_item.csv
+            FILE_FORMAT = (FORMAT_NAME = SOURCE.CSV_FORMAT)
+            """,
+            """
+            COPY INTO PRODUCT
+            FROM @SOURCE.ADLS_RAW_STAGE/product.csv
+            FILE_FORMAT = (FORMAT_NAME = SOURCE.CSV_FORMAT)
+            """,
+            """
+            COPY INTO STORE
+            FROM @SOURCE.ADLS_RAW_STAGE/store.csv
+            FILE_FORMAT = (FORMAT_NAME = SOURCE.CSV_FORMAT)
+            """,
+            """
+            COPY INTO SUPPLY
+            FROM @SOURCE.ADLS_RAW_STAGE/supply.csv
+            FILE_FORMAT = (FORMAT_NAME = SOURCE.CSV_FORMAT)
+            """,
+        ]
+        for sql in copy_cmds:
+            clean_sql = sql.strip()
+            context.log.info(f"  Running COPY:\n{clean_sql}")
+            cursor.execute(clean_sql)
 
         conn.commit()
+        context.log.info("  SOURCE tables successfully loaded from ADLS")
 
         # ══════════════════════════════════════════════
         # STEP 2: READ STREAMS + CHECK THRESHOLDS
@@ -184,7 +139,10 @@ def ingest_daily_data(context):
         context.log.info("=" * 60)
 
         # Read per-table thresholds from config table
-        cursor.execute("SELECT TABLE_NAME, MAX_INSERT_PCT, MAX_UPDATE_PCT, MAX_DELETE_PCT FROM METRICS.THRESHOLD_CONFIG")
+        cursor.execute(
+            "SELECT TABLE_NAME, MAX_INSERT_PCT, MAX_UPDATE_PCT, MAX_DELETE_PCT "
+            "FROM METRICS.THRESHOLD_CONFIG"
+        )
         threshold_rows = cursor.fetchall()
         thresholds = {}
         for t_name, m_ins, m_upd, m_del in threshold_rows:
@@ -196,7 +154,9 @@ def ingest_daily_data(context):
         alerts = []
 
         # One query to read all stream changes
-        cursor.execute("SELECT TABLE_NAME, INSERTS, UPDATES, DELETES FROM SOURCE.ALL_STREAMS_SUMMARY")
+        cursor.execute(
+            "SELECT TABLE_NAME, INSERTS, UPDATES, DELETES FROM SOURCE.ALL_STREAMS_SUMMARY"
+        )
         stream_rows = cursor.fetchall()
 
         for table_name, inserts, updates, deletes in stream_rows:
@@ -229,19 +189,28 @@ def ingest_daily_data(context):
 
             # Check insert threshold
             if ins_pct > t["insert"]:
-                msg = f"INSERT BREACH: SOURCE.{table_name} | {inserts:,} rows ({ins_pct}%) exceeds {t['insert']}% limit"
+                msg = (
+                    f"INSERT BREACH: SOURCE.{table_name} | {inserts:,} rows "
+                    f"({ins_pct}%) exceeds {t['insert']}% limit"
+                )
                 context.log.error(f"    >> {msg}")
                 alerts.append(msg)
 
             # Check update threshold
             if upd_pct > t["update"]:
-                msg = f"UPDATE BREACH: SOURCE.{table_name} | {updates:,} rows ({upd_pct}%) exceeds {t['update']}% limit"
+                msg = (
+                    f"UPDATE BREACH: SOURCE.{table_name} | {updates:,} rows "
+                    f"({upd_pct}%) exceeds {t['update']}% limit"
+                )
                 context.log.error(f"    >> {msg}")
                 alerts.append(msg)
 
             # Check delete threshold
             if del_pct > t["delete"]:
-                msg = f"DELETE BREACH: SOURCE.{table_name} | {deletes:,} rows ({del_pct}%) exceeds {t['delete']}% limit"
+                msg = (
+                    f"DELETE BREACH: SOURCE.{table_name} | {deletes:,} rows "
+                    f"({del_pct}%) exceeds {t['delete']}% limit"
+                )
                 context.log.error(f"    >> {msg}")
                 alerts.append(msg)
 
@@ -271,10 +240,8 @@ def ingest_daily_data(context):
         if conn:
             conn.close()
 
-
 # ══════════════════════════════════════════════════════════════
 # 3. CONFIGURE dbt CLOUD CONNECTION
-#    Values come from .env file (local) or Dagster+ Environment Variables (cloud)
 # ══════════════════════════════════════════════════════════════
 dbt_cloud_connection = dbt_cloud_resource.configured(
     {
@@ -284,21 +251,16 @@ dbt_cloud_connection = dbt_cloud_resource.configured(
     }
 )
 
-
 # ══════════════════════════════════════════════════════════════
 # 4. AUTO-DISCOVER dbt MODELS FROM dbt CLOUD JOB
-#    Reads manifest from dbt Cloud, creates Dagster assets automatically
-#    No manual @asset definitions needed
 # ══════════════════════════════════════════════════════════════
 customer_dbt_assets = load_assets_from_dbt_cloud_job(
     dbt_cloud=dbt_cloud_connection,
     job_id=int(os.getenv("DBT_JOB_ID")),
 )
 
-
 # ══════════════════════════════════════════════════════════════
 # 5a. SNOWFLAKE AUDIT LOGGING (IST timestamps)
-#     Logs every Dagster run (success/failure) to METRICS.DAGSTER_JOB_RUNS
 # ══════════════════════════════════════════════════════════════
 def write_run_to_snowflake(
     context: RunStatusSensorContext,
@@ -343,12 +305,8 @@ def write_run_to_snowflake(
         if conn:
             conn.close()
 
-
 # ══════════════════════════════════════════════════════════════
 # 5b. FETCH dbt CLOUD RUN DETAILS + LOG TO SNOWFLAKE
-#     Calls dbt Cloud API to get per-model status, rows, execution time
-#     Saves to METRICS.DBT_MODEL_RUNS
-#     NOTE: Not called in sensor to avoid timeout. Call manually if needed.
 # ══════════════════════════════════════════════════════════════
 def fetch_dbt_run_results(context: RunStatusSensorContext):
     """Fetch per-model results from dbt Cloud and log to Snowflake."""
@@ -431,11 +389,8 @@ def fetch_dbt_run_results(context: RunStatusSensorContext):
         if conn:
             conn.close()
 
-
 # ══════════════════════════════════════════════════════════════
 # 5c. TRIGGER dbt RETRY JOB ON FAILURE
-#     Calls dbt Cloud API to trigger "Retry Failed Models" job
-#     Only reruns failed models + their downstream dependencies
 # ══════════════════════════════════════════════════════════════
 def trigger_dbt_retry(context: RunStatusSensorContext):
     """Trigger the dbt retry job to rerun only failed models."""
@@ -462,13 +417,8 @@ def trigger_dbt_retry(context: RunStatusSensorContext):
     context.log.info(f"  Retry job triggered! dbt Cloud Run ID: {run_id}")
     context.log.info("  Only failed models from the last run will be re-executed.")
 
-
 # ══════════════════════════════════════════════════════════════
 # 5d. LOG RECORD COUNTS TO SNOWFLAKE (ALL 24 TABLES)
-#     After every successful dbt run, counts rows in all layers
-#     Compares with previous run (no hardcoded values)
-#     Checks percentage-based thresholds
-#     Saves to METRICS.LAYER_ROW_COUNTS
 # ══════════════════════════════════════════════════════════════
 def log_record_counts(context: RunStatusSensorContext):
     """Query row counts per layer, log with before/after, apply thresholds."""
@@ -529,7 +479,10 @@ def log_record_counts(context: RunStatusSensorContext):
         context.log.info("=" * 60)
 
         # Read per-table thresholds from config for SOURCE tables
-        cursor.execute("SELECT TABLE_NAME, MAX_INSERT_PCT, MAX_UPDATE_PCT, MAX_DELETE_PCT FROM METRICS.THRESHOLD_CONFIG")
+        cursor.execute(
+            "SELECT TABLE_NAME, MAX_INSERT_PCT, MAX_UPDATE_PCT, MAX_DELETE_PCT "
+            "FROM METRICS.THRESHOLD_CONFIG"
+        )
         threshold_rows = cursor.fetchall()
         thresholds = {}
         for t_name, m_ins, m_upd, m_del in threshold_rows:
@@ -537,7 +490,10 @@ def log_record_counts(context: RunStatusSensorContext):
 
         context.log.info("  SOURCE thresholds (from METRICS.THRESHOLD_CONFIG):")
         for t_name, limits in thresholds.items():
-            context.log.info(f"    {t_name}: Insert>{limits['insert']}% | Update>{limits['update']}% | Delete>{limits['delete']}%")
+            context.log.info(
+                f"    {t_name}: Insert>{limits['insert']}% | "
+                f"Update>{limits['update']}% | Delete>{limits['delete']}%"
+            )
         context.log.info("-" * 60)
 
         for schema, table in tables:
@@ -594,7 +550,6 @@ def log_record_counts(context: RunStatusSensorContext):
             )
 
             # Threshold checks ONLY for SOURCE layer (using config table values)
-            # LZ/STAGING/DBO are derived from SOURCE — they just reflect it
             if rows_before > 0 and schema == "SOURCE":
                 t = thresholds.get(table, {"insert": MAX_INSERT_PCT, "delete": MAX_DELETE_PCT})
                 t_insert = t.get("insert", MAX_INSERT_PCT)
@@ -639,11 +594,8 @@ def log_record_counts(context: RunStatusSensorContext):
         if conn:
             conn.close()
 
-
 # ══════════════════════════════════════════════════════════════
 # 5e. LOG SOURCE TABLE COUNTS AFTER INGESTION
-#     Only tracks SOURCE tables (where data was just ingested)
-#     Runs after ingestion_job, NOT after dbt_job
 # ══════════════════════════════════════════════════════════════
 def log_source_counts(context: RunStatusSensorContext):
     """Log row counts for SOURCE tables only — runs after ingestion."""
@@ -722,16 +674,8 @@ def log_source_counts(context: RunStatusSensorContext):
         if conn:
             conn.close()
 
-
 # ══════════════════════════════════════════════════════════════
 # 6. SENSORS
-#    - log_success_to_snowflake: different behavior per job
-#      * After ingestion: logs SOURCE row counts only
-#      * After dbt: logs all 24 table row counts
-#    - log_failure_to_snowflake: different behavior per job
-#      * After ingestion failure: logs error only (no retry)
-#      * After dbt failure: logs error + triggers retry
-#    - trigger_dbt_after_ingestion: chains ingestion -> dbt
 # ══════════════════════════════════════════════════════════════
 @run_status_sensor(
     run_status=DagsterRunStatus.SUCCESS,
@@ -757,7 +701,6 @@ def log_success_to_snowflake(context: RunStatusSensorContext):
             log_record_counts(context)
         except Exception as e:
             context.log.warning(f"  Could not log record counts: {e}")
-
 
 @run_status_sensor(
     run_status=DagsterRunStatus.FAILURE,
@@ -785,12 +728,8 @@ def log_failure_to_snowflake(context: RunStatusSensorContext):
     else:
         context.log.info("  Ingestion failed — dbt will not run, no retry needed")
 
-
 # ══════════════════════════════════════════════════════════════
 # 7. JOBS
-#    ingestion_job: runs ONLY ingest_daily_data (ingestion + thresholds)
-#    dbt_job: runs ONLY dbt Cloud models
-#    This separation ensures dbt only runs if ingestion passes
 # ══════════════════════════════════════════════════════════════
 
 # Job that runs ONLY ingestion + threshold check
@@ -807,11 +746,8 @@ dbt_job = define_asset_job(
     executor_def=in_process_executor,
 )
 
-
 # ══════════════════════════════════════════════════════════════
 # 8. SENSOR: Run dbt ONLY after ingestion succeeds
-#    Watches ingestion_job — when it succeeds, triggers dbt_job
-#    If ingestion fails (threshold breach), dbt never runs
 # ══════════════════════════════════════════════════════════════
 @run_status_sensor(
     run_status=DagsterRunStatus.SUCCESS,
@@ -829,18 +765,14 @@ def trigger_dbt_after_ingestion(context: RunStatusSensorContext):
     context.log.info("  Ingestion succeeded + thresholds passed -> triggering dbt Cloud job")
     return RunRequest()
 
-
 # ══════════════════════════════════════════════════════════════
 # 9. SCHEDULE
-#    Daily at 6 AM UTC — triggers ingestion_job first
-#    If ingestion passes, sensor triggers dbt_job automatically
 # ══════════════════════════════════════════════════════════════
 daily_schedule = ScheduleDefinition(
     job=ingestion_job,
     cron_schedule="0 6 * * *",
     execution_timezone="UTC",
 )
-
 
 # ══════════════════════════════════════════════════════════════
 # 10. REGISTER EVERYTHING
