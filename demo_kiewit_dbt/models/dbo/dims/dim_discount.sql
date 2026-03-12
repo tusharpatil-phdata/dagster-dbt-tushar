@@ -30,6 +30,6 @@ select
     valid_from,
     valid_to,
     is_active,
-    current_timestamp() as _updated_at
+    CONVERT_TIMEZONE('America/Los_Angeles', 'Asia/Kolkata', current_timestamp()) as _updated_at,
 from dedup
 where rn = 1
