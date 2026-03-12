@@ -83,3 +83,17 @@ models:
       - name: sku
         tests:
           - not_null
+
+  - name: stg_discount
+    description: 'Silver view - cleaned discounts per customer'
+    columns:
+      - name: discount_id
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        tests:
+          - not_null
+      - name: discount_pct
+        tests:
+          - not_null

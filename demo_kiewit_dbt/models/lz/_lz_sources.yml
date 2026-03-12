@@ -97,6 +97,25 @@ sources:
             tests:
               - not_null
 
+
+  - name: raw_discount
+    description: 'Raw discount data loaded into SOURCE schema'
+    database: DAGSTER_DBT_KIEWIT_DB
+    schema: SOURCE
+    tables:
+      - name: DISCOUNT
+        columns:
+          - name: ID
+            tests:
+              - not_null
+              - unique
+          - name: CUSTOMER_ID
+            tests:
+              - not_null
+
+
+
+
 models:
   - name: raw_customer
     description: 'Bronze model - LZ.RAW_CUSTOMER'
@@ -166,5 +185,16 @@ models:
         tests:
           - not_null
       - name: sku
+        tests:
+          - not_null
+
+  - name: raw_discount
+    description: 'Bronze model - LZ.RAW_DISCOUNT'
+    columns:
+      - name: discount_id
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
         tests:
           - not_null

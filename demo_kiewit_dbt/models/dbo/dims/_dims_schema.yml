@@ -46,3 +46,14 @@ models:
       - name: sku
         tests:
           - not_null
+
+  - name: dim_discount
+    description: 'Gold dimension - discount periods per customer'
+    columns:
+      - name: discount_key
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        tests:
+          - not_null
