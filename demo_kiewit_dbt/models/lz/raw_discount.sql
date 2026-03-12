@@ -13,6 +13,6 @@ select
     PERCENT     as discount_percent_raw,
     VALID_FROM  as valid_from_raw,
     VALID_TO    as valid_to_raw,
-    current_timestamp() as _loaded_at,
+    CONVERT_TIMEZONE('America/Los_Angeles', 'Asia/Kolkata', current_timestamp()) as _updated_at,
     'discounts.csv'     as _source_file
 from {{ source('raw_discount', 'DISCOUNT') }}
